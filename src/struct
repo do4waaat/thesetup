@@ -1,0 +1,16 @@
+Grimoire/
+├── src/
+│   ├── core/                     # Твои базовые обертки и утилиты
+│   │   ├── raii/
+│   │   │   ├── unique_handle.hpp
+│   │   │   ├── unique_handle.cpp
+│   │   │   ├── unique_virtual_buffer.hpp
+│   │   │   └── unique_virtual_buffer.cpp
+│   │   ├── peb_parser.hpp        # Парсинг PEB
+│   │   ├── peb_parser.cpp
+│   │   ├── syscall.hpp           # Indirect Syscalls + SSN
+│   │   └── syscall.cpp
+│   ├── evasion/                  # Обходы AMSI, ETW, Sleep
+│   ├── injectors/                # Early Bird и другие техники
+│   └── main.cpp
+└── README.md

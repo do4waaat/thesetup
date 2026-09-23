@@ -1,5 +1,5 @@
 #include "pe_peb_parser.hpp"
-#include "raii/raii_handle.hpp"
+#include <cstring>
 #include <handleapi.h>
 #include <memoryapi.h>
 #include <minwindef.h>
@@ -11,20 +11,19 @@
 #include <winnt.h>
 #include <winternl.h>
 
-PVOID get_ntdll() {
+PVOID get_base(const wchar_t *module_name) {
 #if defined(_WIN64)
   PPEB peb = (PPEB)__readgsqword(0x60);
 #else
   PPEB peb = (PPEB)__readfsdword(0x30);
 #endif
-  const wchar_t *str = L"ntdll.dll";
   PPEB_LDR_DATA ldr = (PPEB_LDR_DATA)peb->Ldr;
   PLIST_ENTRY head = &ldr->InMemoryOrderModuleList;
   PLIST_ENTRY current = head->Flink;
   while (head != current) {
     PLDR_DATA_TABLE_ENTRY entry =
         CONTAINING_RECORD(current, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks);
-    if (wcsstr(entry->FullDllName.Buffer, str)) {
+    if (wcsstr(entry->FullDllName.Buffer, module_name)) {
       return entry->DllBase;
     }
     current = current->Flink;
@@ -32,66 +31,85 @@ PVOID get_ntdll() {
   return nullptr;
 }
 
-VOID parse_exports(PVOID nt_base, PVX_TABLE table) {
-  PIMAGE_DOS_HEADER dosheader = (PIMAGE_DOS_HEADER)nt_base;
-  PIMAGE_NT_HEADERS ntheaders =
-      (PIMAGE_NT_HEADERS)((PBYTE)nt_base + dosheader->e_lfanew);
-  PIMAGE_OPTIONAL_HEADER optheader =
-      (PIMAGE_OPTIONAL_HEADER)&ntheaders->OptionalHeader;
-  DWORD rva =
-      optheader->DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
-  PIMAGE_EXPORT_DIRECTORY export_dir =
-      (PIMAGE_EXPORT_DIRECTORY)((PBYTE)nt_base + rva);
+bool resolve_syscall_entry(PVOID nt_base, const char *func_name,
+                           PVX_TABLE_ENTRY entry) {
+  if (!nt_base || !func_name || !entry)
+    return false;
 
-  PDWORD array_name = (PDWORD)((PBYTE)nt_base + export_dir->AddressOfNames);
-  PWORD ordinal_array =
+  entry->name = func_name;
+  entry->pAddress = nullptr;
+  entry->wSystemCall = 0;
+  entry->resolved = false;
+
+  PIMAGE_DOS_HEADER dos_header = (PIMAGE_DOS_HEADER)nt_base;
+  PIMAGE_NT_HEADERS nt_headers =
+      (PIMAGE_NT_HEADERS)((PBYTE)nt_base + dos_header->e_lfanew);
+  DWORD export_rva =
+      nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT]
+          .VirtualAddress;
+
+  if (export_rva == 0)
+    return false;
+
+  PIMAGE_EXPORT_DIRECTORY export_dir =
+      (PIMAGE_EXPORT_DIRECTORY)((PBYTE)nt_base + export_rva);
+  PDWORD names_array = (PDWORD)((PBYTE)nt_base + export_dir->AddressOfNames);
+  PWORD ordinals_array =
       (PWORD)((PBYTE)nt_base + export_dir->AddressOfNameOrdinals);
-  PDWORD addresses_of_func_array =
+  PDWORD functions_array =
       (PDWORD)((PBYTE)nt_base + export_dir->AddressOfFunctions);
 
-  for (int i = 0; i < export_dir->NumberOfNames; i++) {
-    PCHAR check_name = (PCHAR)((PBYTE)nt_base + array_name[i]);
-    int func_index = -1;
+  for (DWORD i = 0; i < export_dir->NumberOfNames; i++) {
+    PCHAR current_name = (PCHAR)((PBYTE)nt_base + names_array[i]);
 
-    if (strcmp(check_name, "NtAllocateVirtualMemory") == 0)
-      func_index = 0;
-    else if (strcmp(check_name, "NtProtectVirtualMemory") == 0)
-      func_index = 1;
-    else if (strcmp(check_name, "NtCreateThreadEx") == 0)
-      func_index = 2;
-    else if (strcmp(check_name, "NtWaitForSingleObject") == 0)
-      func_index = 3;
+    if (strcmp(current_name, func_name) == 0) {
+      WORD ordinal = ordinals_array[i];
+      DWORD func_rva = functions_array[ordinal];
+      PBYTE func_addr = (PBYTE)nt_base + func_rva;
 
-    if (func_index != -1) {
-      WORD ordinal = ordinal_array[i];
-      DWORD funcRVA = addresses_of_func_array[ordinal];
-      PBYTE funcAddr = (PBYTE)nt_base + funcRVA;
-      WORD syscall = 0;
+      WORD syscall_num = 0;
+      PBYTE syscall_addr = nullptr;
 
-      if (*funcAddr == 0xB8) {
-        syscall = *(PWORD)(funcAddr + 1);
-      } else if (*(funcAddr + 3) == 0xB8) {
-        syscall = *(PWORD)(funcAddr + 4);
+      for (int j = 0; j < 32; j++) {
+        if (func_addr[j] == 0xB8) {
+          syscall_num = *(DWORD *)(func_addr + j + 1);
+        }
+        if (func_addr[j] == 0x0F && func_addr[j + 1] == 0x05) {
+          syscall_addr = func_addr + j;
+          break;
+        }
       }
 
-      switch (func_index) {
-      case 0:
-        table->NtAllocateVirtualMemory.pAddress = funcAddr;
-        table->NtAllocateVirtualMemory.wSystemCall = syscall;
-        break;
-      case 1:
-        table->NtProtectVirtualMemory.pAddress = funcAddr;
-        table->NtProtectVirtualMemory.wSystemCall = syscall;
-        break;
-      case 2:
-        table->NtCreateThreadEx.pAddress = funcAddr;
-        table->NtCreateThreadEx.wSystemCall = syscall;
-        break;
-      case 3:
-        table->NtWaitForSingleObject.pAddress = funcAddr;
-        table->NtWaitForSingleObject.wSystemCall = syscall;
-        break;
-      }
+      entry->pAddress = syscall_addr;
+      entry->wSystemCall = syscall_num;
+      entry->resolved = (syscall_addr != nullptr && syscall_num != 0);
+      return entry->resolved;
     }
   }
+  return false;
+}
+
+bool parse_exports(PVOID nt_base, const char **func_names, size_t count,
+                   std::vector<VX_TABLE_ENTRY> &out_table) {
+  if (!nt_base || !func_names || count == 0)
+    return false;
+
+  out_table.clear();
+  out_table.reserve(count);
+
+  bool all_resolved = true;
+  for (size_t i = 0; i < count; i++) {
+    VX_TABLE_ENTRY entry;
+    if (resolve_syscall_entry(nt_base, func_names[i], &entry)) {
+      out_table.push_back(entry);
+    } else {
+      entry.name = func_names[i];
+      entry.pAddress = nullptr;
+      entry.wSystemCall = 0;
+      entry.resolved = false;
+      out_table.push_back(entry);
+      all_resolved = false;
+    }
+  }
+  return all_resolved;
 }

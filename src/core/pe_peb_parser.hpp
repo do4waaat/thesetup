@@ -1,18 +1,18 @@
 #pragma once
+#include <vector>
 #include <windows.h>
 
 typedef struct _VX_TABLE_ENTRY {
+  const char *name;
   PVOID pAddress;
-  DWORD64 dwHash;
-  WORD wSystemCall;
+  DWORD wSystemCall;
+  bool resolved;
 } VX_TABLE_ENTRY, *PVX_TABLE_ENTRY;
 
-typedef struct _VX_TABLE {
-  VX_TABLE_ENTRY NtAllocateVirtualMemory;
-  VX_TABLE_ENTRY NtProtectVirtualMemory;
-  VX_TABLE_ENTRY NtCreateThreadEx;
-  VX_TABLE_ENTRY NtWaitForSingleObject;
-} VX_TABLE, *PVX_TABLE;
+PVOID get_base(const wchar_t *module_name);
 
-PVOID get_ntdll();
-VOID parse_exports(PVOID, PVX_TABLE);
+bool resolve_syscall_entry(PVOID nt_base, const char *func_name,
+                           PVX_TABLE_ENTRY entry);
+
+bool parse_exports(PVOID nt_base, const char **func_names, size_t count,
+                   std::vector<VX_TABLE_ENTRY> &out_table);

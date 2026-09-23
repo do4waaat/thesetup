@@ -1,4 +1,4 @@
-Grimoire/
+thesetup/
 ├── src/
 │   ├── core/                     # Твои базовые обертки и утилиты
 │   │   ├── raii/

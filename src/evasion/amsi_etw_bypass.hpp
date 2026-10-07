@@ -7,3 +7,4 @@ typedef HRESULT(WINAPI *fnamsiscanbuffer)(HANDLE, PVOID, ULONG, LPCWSTR, HANDLE,
 
 typedef HRESULT(WINAPI *fnamsiscanstring)(HANDLE, LPCWSTR, LPCWSTR, HANDLE,
                                           PVOID);
+typedef ULONG(WINAPI *fnnttraceevent)(HANDLE, ULONG, ULONG, PVOID);

